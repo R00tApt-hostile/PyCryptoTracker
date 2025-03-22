@@ -13,11 +13,15 @@ class CryptoTracker:
         
         self.api_url = "https://api.coingecko.com/api/v3"
         self.portfolio_file = "portfolio.json"
+        self.alerts_file = "alerts.json"
         self.update_interval = 60  # seconds
         self.currency = "USD"
         
+        self.portfolio = {}
+        self.alerts = []
+        
         self.create_widgets()
-        self.load_portfolio()
+        self.load_data()
         self.update_data()
         self.schedule_updates()
 
@@ -72,22 +76,34 @@ class CryptoTracker:
         # Add/Remove controls
         control_frame = ttk.Frame(self.portfolio_tab)
         self.coin_var = tk.StringVar()
-        ttk.Combobox(control_frame, textvariable=self.coin_var).pack(side=tk.LEFT)
-        ttk.Entry(control_frame).pack(side=tk.LEFT)  # Amount entry
-        ttk.Button(control_frame, text="Add", command=self.add_to_portfolio).pack(side=tk.LEFT)
-        ttk.Button(control_frame, text="Remove", command=self.remove_from_portfolio).pack(side=tk.LEFT)
+        self.coin_menu = ttk.Combobox(control_frame, textvariable=self.coin_var)
+        self.coin_menu.pack(side=tk.LEFT, padx=5)
+        
+        self.amount_var = tk.StringVar()
+        ttk.Entry(control_frame, textvariable=self.amount_var, width=10).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(control_frame, text="Add", command=self.add_to_portfolio).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Remove", command=self.remove_from_portfolio).pack(side=tk.LEFT, padx=5)
         control_frame.pack(side=tk.BOTTOM, pady=10)
 
     def create_alerts_tab(self):
-        # Alert configuration
+        # Alert List
         self.alerts_list = tk.Listbox(self.alerts_tab)
         self.alerts_list.pack(expand=True, fill='both', side=tk.LEFT)
         
+        # Alert Configuration
         alert_frame = ttk.Frame(self.alerts_tab)
-        ttk.Combobox(alert_frame).pack()
-        ttk.Entry(alert_frame).pack()  # Target price
-        ttk.Button(alert_frame, text="Set Alert").pack()
-        alert_frame.pack(side=tk.RIGHT)
+        
+        self.alert_coin_var = tk.StringVar()
+        self.alert_coin_menu = ttk.Combobox(alert_frame, textvariable=self.alert_coin_var)
+        self.alert_coin_menu.pack(pady=5)
+        
+        self.alert_price_var = tk.StringVar()
+        ttk.Entry(alert_frame, textvariable=self.alert_price_var, width=10).pack(pady=5)
+        
+        ttk.Button(alert_frame, text="Set Alert", command=self.set_alert).pack(pady=5)
+        ttk.Button(alert_frame, text="Remove Alert", command=self.remove_alert).pack(pady=5)
+        alert_frame.pack(side=tk.RIGHT, padx=10)
 
     def schedule_updates(self):
         self.update_data()
@@ -107,6 +123,7 @@ class CryptoTracker:
             response = requests.get(url, params=params)
             data = response.json()
             
+            # Update market data table
             self.tree.delete(*self.tree.get_children())
             for coin in data:
                 self.tree.insert('', 'end', values=(
@@ -118,37 +135,147 @@ class CryptoTracker:
                     f"{coin['market_cap']:,.0f}"
                 ))
             
+            # Update coin dropdowns
+            coin_names = [coin['id'] for coin in data]
+            self.coin_menu['values'] = coin_names
+            self.alert_coin_menu['values'] = coin_names
+            
+            # Update portfolio and alerts
             self.update_portfolio_values()
+            self.check_price_alerts()
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to fetch data: {str(e)}")
 
-    def load_portfolio(self):
+    def load_data(self):
         try:
             with open(self.portfolio_file, 'r') as f:
                 self.portfolio = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             self.portfolio = {}
+        
+        try:
+            with open(self.alerts_file, 'r') as f:
+                self.alerts = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            self.alerts = []
 
-    def save_portfolio(self):
+    def save_data(self):
         with open(self.portfolio_file, 'w') as f:
             json.dump(self.portfolio, f)
+        with open(self.alerts_file, 'w') as f:
+            json.dump(self.alerts, f)
 
     def add_to_portfolio(self):
-        # Implementation for adding coins to portfolio
-        pass
+        coin = self.coin_var.get()
+        amount = self.amount_var.get()
+        
+        if not coin or not amount:
+            messagebox.showwarning("Input Error", "Please select a coin and enter an amount.")
+            return
+        
+        try:
+            amount = float(amount)
+            if amount <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("Input Error", "Amount must be a positive number.")
+            return
+        
+        self.portfolio[coin] = self.portfolio.get(coin, 0) + amount
+        self.save_data()
+        self.update_portfolio_values()
+        messagebox.showinfo("Success", f"Added {amount} of {coin} to your portfolio.")
 
     def remove_from_portfolio(self):
-        # Implementation for removing coins from portfolio
-        pass
+        coin = self.coin_var.get()
+        if not coin or coin not in self.portfolio:
+            messagebox.showwarning("Input Error", "Coin not found in portfolio.")
+            return
+        
+        self.portfolio.pop(coin)
+        self.save_data()
+        self.update_portfolio_values()
+        messagebox.showinfo("Success", f"Removed {coin} from your portfolio.")
 
     def update_portfolio_values(self):
-        # Implementation for updating portfolio values
-        pass
+        self.portfolio_tree.delete(*self.portfolio_tree.get_children())
+        total_value = 0
+        
+        for coin, amount in self.portfolio.items():
+            price = self.get_coin_price(coin)
+            if price:
+                value = amount * price
+                total_value += value
+                self.portfolio_tree.insert('', 'end', values=(
+                    coin, amount, f"${value:,.2f}", "N/A"
+                ))
+        
+        # Update total portfolio value
+        self.portfolio_tree.insert('', 'end', values=(
+            "Total", "", f"${total_value:,.2f}", ""
+        ))
+
+    def get_coin_price(self, coin_id):
+        url = f"{self.api_url}/simple/price"
+        params = {
+            'ids': coin_id,
+            'vs_currencies': self.currency.lower()
+        }
+        response = requests.get(url, params=params)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get(coin_id, {}).get(self.currency.lower(), 0)
+        return 0
+
+    def set_alert(self):
+        coin = self.alert_coin_var.get()
+        price = self.alert_price_var.get()
+        
+        if not coin or not price:
+            messagebox.showwarning("Input Error", "Please select a coin and enter a target price.")
+            return
+        
+        try:
+            price = float(price)
+            if price <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("Input Error", "Target price must be a positive number.")
+            return
+        
+        self.alerts.append({'coin': coin, 'target_price': price})
+        self.save_data()
+        self.update_alerts_list()
+        messagebox.showinfo("Success", f"Alert set for {coin} at ${price:,.2f}.")
+
+    def remove_alert(self):
+        selected = self.alerts_list.curselection()
+        if not selected:
+            messagebox.showwarning("Input Error", "Please select an alert to remove.")
+            return
+        
+        self.alerts.pop(selected[0])
+        self.save_data()
+        self.update_alerts_list()
+        messagebox.showinfo("Success", "Alert removed.")
+
+    def update_alerts_list(self):
+        self.alerts_list.delete(0, tk.END)
+        for alert in self.alerts:
+            self.alerts_list.insert(tk.END, f"{alert['coin']} - ${alert['target_price']:,.2f}")
 
     def check_price_alerts(self):
-        # Implementation for price alerts
-        pass
+        for alert in self.alerts:
+            coin = alert['coin']
+            target_price = alert['target_price']
+            current_price = self.get_coin_price(coin)
+            
+            if current_price and current_price >= target_price:
+                messagebox.showinfo("Price Alert", f"{coin} has reached your target price of ${target_price:,.2f}!")
+                self.alerts.remove(alert)
+                self.save_data()
+                self.update_alerts_list()
 
 if __name__ == "__main__":
     root = tk.Tk()
